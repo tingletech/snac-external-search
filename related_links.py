@@ -35,13 +35,18 @@ def main(argv=None):
     if argv is None:
         argv = parser.parse_args()
 
+    sd_dir = argv.supplemental_data[0]
+
+    assert os.path.isdir(sd_dir), \
+        "supplemental_data {0} directory must exist".format(sd_dir)
+
     config = ConfigParser.ConfigParser()
     config.read('api.ini')
 
     for root, ____, files in os.walk(argv.data[0]):
         for f in files:
             fullpath = os.path.join(root, f)
-            supppath = os.path.join(argv.supplemental_data[0], f)
+            supppath = os.path.join(sd_dir, f)
             if not os.path.isfile(supppath):
                 process_file(fullpath, supppath, config)
 
@@ -52,6 +57,7 @@ def process_file(eac, newfile, config):
     wikipedia_url = xml.xpath(XPATH_WIKIPEDIA, namespaces=NS)
 
     assert name_heading, "must have a name"
+    print(name_heading)
 
     dpla_base = config.get('dpla', 'base')
     europeana_base = config.get('europeana', 'base')
@@ -61,26 +67,46 @@ def process_file(eac, newfile, config):
     europeana_key = config.get('europeana', 'api_key')
 
     if wikipedia_url:
-        res = wikipedia_sparql_query(wikipedia_url[0], dbpedia_base)
-        if res:
-            pp(res)
+        wiki_thumb = wikipedia_sparql_query(wikipedia_url[0], dbpedia_base)
+    else:
+        wiki_thumb = None
 
     dpla_link = dpla_query(name_heading, dpla_base, dpla_key)
-    europeana_link = europeana_query(name_heading, europeana_base, europeana_key)
+    europeana_link = europeana_query(
+        name_heading, europeana_base, europeana_key)
 
-    pp(dpla_link)
-    pp(europeana_link)
+    et = etree.ElementTree(
+        xml_template(
+            name_heading, wiki_thumb, dpla_link, europeana_link
+        )
+    )
+    et.write(newfile)
 
 
+def xml_template(name_heading, wiki_thumb, dpla_link, europeana_link):
+    supp = etree.Element('s', n=name_heading)
+    if wiki_thumb and wiki_thumb['thumbnail']:
+        supp.set('thumb', wiki_thumb['thumbnail'])
+        supp.set('thumb_rights', wiki_thumb['attribution'])
+    if dpla_link:
+        supp.set('dpla', '1')
+    if europeana_link:
+        supp.set('europeana', '1')
+    return supp
+
+
+# "http://api.dp.la/v2/items?q=___&api_key=____&page_size=0"
 def dpla_query(name_heading, base_url, api_key, polite_factor=1):
-    #; "http://api.dp.la/v2/items?q=___&api_key=____&page_size=0"
     params = {
         'q': name_heading,
         'api_key': api_key,
         'page_size': 0,
     }
     res = requests.get(url=base_url, params=params)
-    res.raise_for_status()
+    try:
+        res.raise_for_status()
+    except requests.exceptions.HTTPError:
+        return False
     sleeper(res, polite_factor)
     results = json.loads(res.text)
     if results['count'] > 0:
@@ -89,16 +115,19 @@ def dpla_query(name_heading, base_url, api_key, polite_factor=1):
         return False
 
 
+# "http://europeana.eu/api/v2/search.json?wskey=___&query=____&start=1&rows=0"
 def europeana_query(name_heading, base_url, api_key, polite_factor=1):
-    #; "http://europeana.eu/api/v2/search.json?wskey=___&query=____&start=1&rows=0"
     params = {
         'wskey': api_key,
-        'query': name_heading,
+        'query': name_heading.replace('/', ' ').replace(':', ' '),
         'start': 1,
         'rows': 0,
     }
     res = requests.get(url=base_url, params=params)
-    res.raise_for_status()
+    try:
+        res.raise_for_status()
+    except requests.exceptions.HTTPError:
+        return False
     sleeper(res, polite_factor)
     results = json.loads(res.text)
     if results['totalResults'] > 0:
@@ -137,22 +166,25 @@ def wikipedia_sparql_query(wikipedia_url, sparql_url, polite_factor=1):
     if len(results['results']['bindings']) > 0:
         attribution = results['results']['bindings'][0]['attribution']['value']
         thumbnail = results['results']['bindings'][0]['thumbnail']['value']
-        thumbnail = thumbnail.replace('200px-','150px-')
+        thumbnail = thumbnail.replace('200px-', '150px-')
         out = {
             "attribution": attribution,
-            "thumbnail": correct_url(thumbnail),
+            "thumbnail": correct_url(thumbnail, attribution),
         }
     sleeper(res, polite_factor)
-    logging.debug('waited for {0} seconds'.format(seconds * polite_factor))
     return out
 
 
 def sleeper(res, polite_factor):
-    seconds = (res.elapsed.microseconds + (res.elapsed.seconds + res.elapsed.days*24*3600) * 1e6) / 1e6
+    ms = res.elapsed.microseconds
+    secs = res.elapsed.seconds
+    days = res.elapsed.days
+    seconds = (ms + (secs + days*24*3600) * 1e6) / 1e6
     sleep(seconds * polite_factor)
+    logging.debug('waited for {0} seconds'.format(seconds * polite_factor))
 
 
-def correct_url(url):
+def correct_url(url, rights):
     """
 correct_url
 
@@ -168,7 +200,6 @@ returns a checked (good) URL as a unicode string or None
     # something is not right
     # if the attribute page for the image does not exist, then we
     # won't find a thumbnail, so we may as well give up now
-    rights = thumb['attribution']
     rightsres = requests.head(rights)
     if (rightsres.status_code != requests.codes.ok):
         return None
@@ -182,12 +213,13 @@ returns a checked (good) URL as a unicode string or None
         return correct_url_500(url)
     # not sure we can get here, something might be very wrong
     else:
-        raise Exception("wikipedia thumbnail URL {0} had unexpected status code {1}".format(urlres.status_code,
-                                                                                            url))
+        raise Exception("wikipedia thumbnail URL {0} had unexpected" +
+                        "status code {1}".format(urlres.status_code, url))
+
 
 def correct_url_404(url):
     # try english wikipedia
-    url = url.replace('/commons/','/en/',1)
+    url = url.replace('/commons/', '/en/', 1)
     res = requests.head(url)
     if (res.status_code == requests.codes.ok):
         return url
@@ -200,7 +232,7 @@ def correct_url_404(url):
 
 def correct_url_500(url):
     # a 500 usually means the size we requested is too large
-    for size in ['100','75','50','25']:
+    for size in ['100', '75', '50', '25']:
         tryagain = try_smaller_image(url, size)
         if tryagain is not None:
             return tryagain
@@ -209,7 +241,7 @@ def correct_url_500(url):
 
 
 def try_smaller_image(url, size):
-    string = u''.join(['/', size , 'px-'])
+    string = u''.join(['/', size, 'px-'])
     url = url.replace('/150px-', string, 1)
     res = requests.head(url)
     if (res.status_code == requests.codes.ok):
