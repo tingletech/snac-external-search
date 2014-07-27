@@ -43,6 +43,8 @@ def main(argv=None):
     config = ConfigParser.ConfigParser()
     config.read('api.ini')
 
+    print("starting")
+
     for root, ____, files in os.walk(argv.data[0]):
         for f in files:
             fullpath = os.path.join(root, f)
@@ -57,7 +59,7 @@ def process_file(eac, newfile, config):
     wikipedia_url = xml.xpath(XPATH_WIKIPEDIA, namespaces=NS)
 
     assert name_heading, "must have a name"
-    print(name_heading)
+    print(name_heading.encode('utf-8'))
 
     dpla_base = config.get('dpla', 'base')
     europeana_base = config.get('europeana', 'base')
@@ -67,13 +69,12 @@ def process_file(eac, newfile, config):
     europeana_key = config.get('europeana', 'api_key')
 
     if wikipedia_url:
-        wiki_thumb = wikipedia_sparql_query(wikipedia_url[0], dbpedia_base)
+        wiki_thumb = wikipedia_sparql_query(wikipedia_url[0], dbpedia_base, 1)
     else:
         wiki_thumb = None
 
-    dpla_link = dpla_query(name_heading, dpla_base, dpla_key)
-    europeana_link = europeana_query(
-        name_heading, europeana_base, europeana_key)
+    dpla_link = dpla_query(name_heading, dpla_base, dpla_key, 1)
+    europeana_link = False # forget eu
 
     et = etree.ElementTree(
         xml_template(
